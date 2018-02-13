@@ -47,7 +47,20 @@ genrule(
 
 tf_cc_shared_object(
     name = "libdeepspeech.so",
-    srcs = ["deepspeech.cc", "deepspeech.h", "deepspeech_utils.h", "alphabet.h", "beam_search.h", "trie_node.h"] +
+    srcs = ["deepspeech.cc",
+            "deepspeech.h",
+            "deepspeech_utils.h",
+            "alphabet.h",
+            "beam_search.h",
+            "trie_node.h",
+            "c_speech_features/c_speech_features.c",
+            "kiss_fft130/kiss_fft.c",
+            "kiss_fft130/tools/kiss_fftr.c",
+            "c_speech_features/c_speech_features.h",
+            "c_speech_features/c_speech_features_config.h",
+            "kiss_fft130/kiss_fft.h",
+            "kiss_fft130/_kiss_fft_guts.h",
+            "kiss_fft130/tools/kiss_fftr.h"] +
            if_native_model(["deepspeech_model_core.h"]) +
            glob(["kenlm/lm/*.cc", "kenlm/util/*.cc", "kenlm/util/double-conversion/*.cc",
                  "kenlm/lm/*.hh", "kenlm/util/*.hh", "kenlm/util/double-conversion/*.h"],
@@ -55,37 +68,38 @@ tf_cc_shared_object(
            glob(["boost_locale/**/*.hpp"]),
     # -Wno-sign-compare to silent a lot of warnings from tensorflow itself,
     # which makes it harder to see our own warnings
-    copts = ["-std=c++11", "-Wno-sign-compare", "-fvisibility=hidden"] + if_native_model([
+    copts = ["-Wno-sign-compare", "-fvisibility=hidden"] + if_native_model([
         "-DDS_MODEL_TIMESTEPS=$(DS_MODEL_TIMESTEPS)",
         "-DDS_NATIVE_MODEL=1",
     ]),
     deps = [
         "//tensorflow/core:core_cpu",
         "//tensorflow/core:direct_session",
-        ### "//tensorflow/core:all_kernels",
+        "//tensorflow/core:all_kernels",
         ### => Trying to be more fine-grained
         ### Obtained by trial/error process ...
         ### CPU only build libdeepspeech.so from 63M to 36M
-        "//tensorflow/core/kernels:constant_op",        # Const
-        "//tensorflow/core/kernels:identity_op",        # Identity
-        "//tensorflow/core/kernels:transpose_op",       # Transpose
-        "//tensorflow/core/kernels:reshape_op",         # Reshape
-        "//tensorflow/core/kernels:shape_ops",          # Shape
-        "//tensorflow/core/kernels:strided_slice_op",   # StridedSlice
-        "//tensorflow/core/kernels:pack_op",            # Pack
-        "//tensorflow/core/kernels:reverse_op",         # ReverseV2
-        "//tensorflow/core/kernels:concat_op",          # ConcatV2
-        "//tensorflow/core/kernels:split_op",           # Split
-        "//tensorflow/core/kernels:sparse_to_dense_op", # SparseToDense
-        "//tensorflow/core/kernels:relu_op",            # Relu
-        "//tensorflow/core/kernels:bias_op",            # BiasAdd
-        "//tensorflow/core/kernels:math",               # Range, MatMul
-        "//tensorflow/core/kernels:tensor_array_ops",   # Placeholder, TensorArrayV3
-        "//tensorflow/core/kernels:control_flow_ops",   # Enter
-        "//tensorflow/core/kernels:ctc_ops",            # CTCBeamSearchDecoder
-        ### Needed by production model produced without "--use_seq_length False"
-        "//tensorflow/core/kernels:logging_ops",         # Assert
-        "//tensorflow/core/kernels:reverse_sequence_op", # ReverseSequence
+        #"//tensorflow/core/kernels:assign_op",          # Assign
+        #"//tensorflow/core/kernels:constant_op",        # Const
+        #"//tensorflow/core/kernels:identity_op",        # Identity
+        #"//tensorflow/core/kernels:transpose_op",       # Transpose
+        #"//tensorflow/core/kernels:reshape_op",         # Reshape
+        #"//tensorflow/core/kernels:shape_ops",          # Shape
+        #"//tensorflow/core/kernels:strided_slice_op",   # StridedSlice
+        #"//tensorflow/core/kernels:pack_op",            # Pack
+        #"//tensorflow/core/kernels:reverse_op",         # ReverseV2
+        #"//tensorflow/core/kernels:concat_op",          # ConcatV2
+        #"//tensorflow/core/kernels:split_op",           # Split
+        #"//tensorflow/core/kernels:sparse_to_dense_op", # SparseToDense
+        #"//tensorflow/core/kernels:relu_op",            # Relu
+        #"//tensorflow/core/kernels:bias_op",            # BiasAdd
+        #"//tensorflow/core/kernels:math",               # Range, MatMul
+        #"//tensorflow/core/kernels:tensor_array_ops",   # Placeholder, TensorArrayV3
+        #"//tensorflow/core/kernels:control_flow_ops",   # Enter
+        #"//tensorflow/core/kernels:ctc_ops",            # CTCBeamSearchDecoder
+        #### Needed by production model produced without "--use_seq_length False"
+        #"//tensorflow/core/kernels:logging_ops",         # Assert
+        #"//tensorflow/core/kernels:reverse_sequence_op", # ReverseSequence
         # Classic deps
         "//tensorflow/core/util/ctc",
         "//third_party/eigen3",
@@ -96,7 +110,7 @@ tf_cc_shared_object(
         "//tensorflow/core:core",
         "//tensorflow/core/kernels:slice_op_gpu",       # Slice GPU
     ]),
-    includes = ["kenlm", "boost_locale"],
+    includes = ["kenlm", "boost_locale", "c_speech_features", "kiss_fft130"],
     defines = ["KENLM_MAX_ORDER=6"],
 )
 

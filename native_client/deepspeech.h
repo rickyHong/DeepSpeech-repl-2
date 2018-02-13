@@ -8,7 +8,9 @@
 namespace DeepSpeech
 {
 
-  class Private;
+  struct Private;
+
+  struct StreamingState;
 
   class Model {
     private:
@@ -25,6 +27,12 @@ namespace DeepSpeech
        * @param[out] String representing the decoded text.
        */
       char* decode(int aNFrames, float*** aLogits);
+
+      float*** infer_no_decode(float* aMfcc,
+                  int aNFrames,
+                  int aFrameLen = 0);
+
+      void free_logits(float*** aLogits);
 
     public:
       /**
@@ -128,6 +136,12 @@ namespace DeepSpeech
       char* stt(const short* aBuffer,
                 unsigned int aBufferSize,
                 int aSampleRate);
+
+      StreamingState* setupStream(unsigned int aPreAllocFrames = 100, unsigned int aSampleRate = 16000);
+
+      void feedAudioContent(StreamingState* ctx, const short* aBuffer, unsigned int aBufferSize);
+
+      char* finishStream(StreamingState* ctx);
   };
 
 }

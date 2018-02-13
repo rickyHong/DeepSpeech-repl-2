@@ -432,44 +432,32 @@ def BiRNN(batch_x, seq_length, dropout):
     # Now we create the forward and backward LSTM units.
     # Both of which have inputs of length `n_cell_dim` and bias `1.0` for the forget gate of the LSTM.
 
-    # Forward direction cell: (if else required for TF 1.0 and 1.1 compat)
-    lstm_fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
-                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
-                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
-    lstm_fw_cell = tf.contrib.rnn.DropoutWrapper(lstm_fw_cell,
-                                                input_keep_prob=1.0 - dropout[3],
-                                                output_keep_prob=1.0 - dropout[3],
-                                                seed=FLAGS.random_seed)
-    # Backward direction cell: (if else required for TF 1.0 and 1.1 compat)
-    lstm_bw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True) \
-                   if 'reuse' not in inspect.getargspec(tf.contrib.rnn.BasicLSTMCell.__init__).args else \
-                   tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
-    lstm_bw_cell = tf.contrib.rnn.DropoutWrapper(lstm_bw_cell,
-                                                input_keep_prob=1.0 - dropout[4],
-                                                output_keep_prob=1.0 - dropout[4],
-                                                seed=FLAGS.random_seed)
+    # Forward direction cell:
+    fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+    fw_cell = tf.contrib.rnn.DropoutWrapper(fw_cell,
+                                            input_keep_prob=1.0 - dropout[3],
+                                            output_keep_prob=1.0 - dropout[3],
+                                            seed=FLAGS.random_seed)
 
     # `layer_3` is now reshaped into `[n_steps, batch_size, 2*n_cell_dim]`,
-    # as the LSTM BRNN expects its input to be of shape `[max_time, batch_size, input_size]`.
+    # as the LSTM RNN expects its input to be of shape `[max_time, batch_size, input_size]`.
     layer_3 = tf.reshape(layer_3, [-1, batch_x_shape[0], n_hidden_3])
 
-    # Now we feed `layer_3` into the LSTM BRNN cell and obtain the LSTM BRNN output.
-    outputs, output_states = tf.nn.bidirectional_dynamic_rnn(cell_fw=lstm_fw_cell,
-                                                             cell_bw=lstm_bw_cell,
-                                                             inputs=layer_3,
-                                                             dtype=tf.float32,
-                                                             time_major=True,
-                                                             sequence_length=seq_length)
+    # Now we feed `layer_3` into the LSTM RNN cell and obtain the LSTM RNN output.
+    output, output_state = tf.nn.dynamic_rnn(cell=fw_cell,
+                                             inputs=layer_3,
+                                             dtype=tf.float32,
+                                             time_major=True,
+                                             sequence_length=seq_length)
 
-    # Reshape outputs from two tensors each of shape [n_steps, batch_size, n_cell_dim]
-    # to a single tensor of shape [n_steps*batch_size, 2*n_cell_dim]
-    outputs = tf.concat(outputs, 2)
-    outputs = tf.reshape(outputs, [-1, 2*n_cell_dim])
+    # Reshape output from a tensor of shape [n_steps, batch_size, n_cell_dim]
+    # to a tensor of shape [n_steps*batch_size, n_cell_dim]
+    output = tf.reshape(output, [-1, n_cell_dim])
 
-    # Now we feed `outputs` to the fifth hidden layer with clipped RELU activation and dropout
+    # Now we feed `output` to the fifth hidden layer with clipped RELU activation and dropout
     b5 = variable_on_worker_level('b5', [n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.b5_stddev))
-    h5 = variable_on_worker_level('h5', [(2 * n_cell_dim), n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.h5_stddev))
-    layer_5 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(outputs, h5), b5)), FLAGS.relu_clip)
+    h5 = variable_on_worker_level('h5', [n_cell_dim, n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.h5_stddev))
+    layer_5 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(output, h5), b5)), FLAGS.relu_clip)
     layer_5 = tf.nn.dropout(layer_5, (1.0 - dropout[5]))
 
     # Now we apply the weight matrix `h6` and bias `b6` to the output of `layer_5`
@@ -1685,31 +1673,106 @@ def train(server=None):
                   ' or removing the contents of {0}.'.format(FLAGS.checkpoint_dir))
         sys.exit(1)
 
-def create_inference_graph(batch_size=None, output_is_logits=False, use_new_decoder=False):
+def inference_birnn_step(batch_x, fw_cell, previous_state, batch_size=1):
+    # Input shape: [batch_size=1, n_steps=1, n_input + 2*n_input*n_context]
+
+    # Reshaping `batch_x` to a tensor with shape `[n_steps*batch_size, n_input + 2*n_input*n_context]`.
+    # This is done to prepare the batch for input into the first layer which expects a tensor of rank `2`.
+
+    # Permute n_steps and batch_size
+    # batch_x = tf.transpose(batch_x, [1, 0, 2])
+    # Reshape to prepare input for first layer
+    # batch_x = tf.reshape(batch_x, [-1, n_input + 2*n_input*n_context]) # (n_steps*batch_size, n_input + 2*n_input*n_context)
+
+    # 1st layer
+    b1 = variable_on_worker_level('b1', [n_hidden_1], tf.random_normal_initializer(stddev=FLAGS.b1_stddev))
+    h1 = variable_on_worker_level('h1', [n_input + 2*n_input*n_context, n_hidden_1], tf.contrib.layers.xavier_initializer(uniform=False))
+    layer_1 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(batch_x, h1), b1)), FLAGS.relu_clip)
+
+    # 2nd layer
+    b2 = variable_on_worker_level('b2', [n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.b2_stddev))
+    h2 = variable_on_worker_level('h2', [n_hidden_1, n_hidden_2], tf.random_normal_initializer(stddev=FLAGS.h2_stddev))
+    layer_2 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_1, h2), b2)), FLAGS.relu_clip)
+
+    # 3rd layer
+    b3 = variable_on_worker_level('b3', [n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.b3_stddev))
+    h3 = variable_on_worker_level('h3', [n_hidden_2, n_hidden_3], tf.random_normal_initializer(stddev=FLAGS.h3_stddev))
+    layer_3 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(layer_2, h3), b3)), FLAGS.relu_clip)
+
+    # Now we create the forward and backward LSTM units.
+    # Both of which have inputs of length `n_cell_dim` and bias `1.0` for the forget gate of the LSTM.
+
+    # `layer_3` is now reshaped into `[n_steps, batch_size, 2*n_cell_dim]`,
+    # as the LSTM RNN expects its input to be of shape `[max_time, batch_size, input_size]`.
+    # layer_3 = tf.reshape(layer_3, [-1, batch_size, n_hidden_3])
+
+    # Now we feed `layer_3` into the LSTM RNN cell and obtain the LSTM RNN output.
+    # output, output_state = tf.nn.dynamic_rnn(cell=fw_cell,
+    #                                          inputs=layer_3,
+    #                                          dtype=tf.float32,
+    #                                          time_major=True,
+    #                                          sequence_length=seq_length)
+
+    output, output_state = fw_cell(layer_3, previous_state)
+
+    # Reshape output from a tensor of shape [n_steps, batch_size, n_cell_dim]
+    # to a tensor of shape [n_steps*batch_size, n_cell_dim]
+    # output = tf.reshape(output, [-1, n_cell_dim])
+
+    b5 = variable_on_worker_level('b5', [n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.b5_stddev))
+    h5 = variable_on_worker_level('h5', [n_cell_dim, n_hidden_5], tf.random_normal_initializer(stddev=FLAGS.h5_stddev))
+    layer_5 = tf.minimum(tf.nn.relu(tf.add(tf.matmul(output, h5), b5)), FLAGS.relu_clip)
+
+    # Now we apply the weight matrix `h6` and bias `b6` to the output of `layer_5`
+    # creating `n_classes` dimensional vectors, the logits.
+    b6 = variable_on_worker_level('b6', [n_hidden_6], tf.random_normal_initializer(stddev=FLAGS.b6_stddev))
+    h6 = variable_on_worker_level('h6', [n_hidden_5, n_hidden_6], tf.contrib.layers.xavier_initializer(uniform=False))
+    layer_6 = tf.add(tf.matmul(layer_5, h6), b6)
+
+    # Finally we reshape layer_6 from a tensor of shape [n_steps*batch_size, n_hidden_6]
+    # to the slightly more useful shape [n_steps, batch_size, n_hidden_6].
+    # Note, that this differs from the input in that it is time-major.
+    # layer_6 = tf.reshape(layer_6, [-1, batch_size, n_hidden_6], name="logits")
+    layer_6 = tf.identity(layer_6, name="logits")
+
+    # Output shape: [n_steps, batch_size, n_hidden_6]
+    return layer_6, output_state
+
+def create_inference_graph(batch_size=None, use_new_decoder=False):
     # Input tensor will be of shape [batch_size, n_steps, n_input + 2*n_input*n_context]
-    input_tensor = tf.placeholder(tf.float32, [batch_size, None, n_input + 2*n_input*n_context], name='input_node')
-    seq_length = tf.placeholder(tf.int32, [batch_size], name='input_lengths')
+    input_tensor = tf.placeholder(tf.float32, [batch_size, n_input + 2*n_input*n_context], name='input_node')
+    is_first_step = tf.placeholder(tf.bool, [], name='is_first_step')
+
+    # Forward direction cell:
+    fw_cell = tf.contrib.rnn.BasicLSTMCell(n_cell_dim, forget_bias=1.0, state_is_tuple=True)
+
+    # Initial zero state
+    zero_state_c, zero_state_h = fw_cell.zero_state(batch_size, tf.float32)
+    zero_state_c = tf.identity(zero_state_c, name='zero_state_c')
+    zero_state_h = tf.identity(zero_state_h, name='zero_state_h')
+
+    previous_state_c = variable_on_worker_level('previous_state_c', [batch_size, fw_cell.state_size.c], None)
+    previous_state_h = variable_on_worker_level('previous_state_h', [batch_size, fw_cell.state_size.h], None)
+
+    initialize_c = tf.assign(previous_state_c, zero_state_c)
+    initialize_h = tf.assign(previous_state_h, zero_state_h)
+
+    initialize_state = tf.group(initialize_c, initialize_h, name='initialize_state')
 
     # Calculate the logits of the batch using BiRNN
-    logits = BiRNN(input_tensor, tf.to_int64(seq_length) if FLAGS.use_seq_length else None, no_dropout)
+    logits, (new_state_c, new_state_h) = inference_birnn_step(input_tensor, fw_cell, (previous_state_c, previous_state_h), batch_size)
 
-    if output_is_logits:
-        return logits
-
-    # Beam search decode the batch
-    decoder = decode_with_lm if use_new_decoder else tf.nn.ctc_beam_search_decoder
-
-    decoded, _ = decoder(logits, seq_length, merge_repeated=False, beam_width=FLAGS.beam_width)
-    decoded = tf.convert_to_tensor(
-        [tf.sparse_tensor_to_dense(sparse_tensor) for sparse_tensor in decoded], name='output_node')
+    with tf.control_dependencies([tf.assign(previous_state_c, new_state_c), tf.assign(previous_state_h, new_state_h)]):
+        logits = tf.identity(logits)
 
     return (
         {
             'input': input_tensor,
-            'input_lengths': seq_length,
+            'is_first_step': is_first_step
         },
         {
-            'outputs': decoded,
+            'outputs': logits,
+            'initialize_state': initialize_state
         }
     )
 
@@ -1724,54 +1787,58 @@ def export():
         tf.reset_default_graph()
         session = tf.Session(config=session_config)
 
-        inputs, outputs = create_inference_graph()
+        inputs, outputs = create_inference_graph(batch_size=1)
 
         # TODO: Transform the decoded output to a string
 
-        # Create a saver and exporter using variables from the above newly created graph
-        saver = tf.train.Saver(tf.global_variables())
-        model_exporter = exporter.Exporter(saver)
+        # Create a saver using variables from the above newly created graph
+        def fixup(name):
+            if name.startswith('basic_lstm_cell/'):
+                return 'rnn/' + name
+            return name
+
+        mapping = {fixup(v.op.name): v for v in tf.global_variables()}
+        del mapping['previous_state_c']
+        del mapping['previous_state_h']
+        saver = tf.train.Saver(mapping)
 
         # Restore variables from training checkpoint
         # TODO: This restores the most recent checkpoint, but if we use validation to counterract
         #       over-fitting, we may want to restore an earlier checkpoint.
         checkpoint = tf.train.get_checkpoint_state(FLAGS.checkpoint_dir)
         checkpoint_path = checkpoint.model_checkpoint_path
-        saver.restore(session, checkpoint_path)
-        log_info('Restored checkpoint at training epoch %d' % (int(checkpoint_path.split('-')[-1]) + 1))
 
-        # Initialise the model exporter and export the model
-        model_exporter.init(session.graph.as_graph_def(),
-                            named_graph_signatures = {
-                                'inputs': exporter.generic_signature(inputs),
-                                'outputs': exporter.generic_signature(outputs)
-                            })
         if FLAGS.remove_export:
-            actual_export_dir = os.path.join(FLAGS.export_dir, '%08d' % FLAGS.export_version)
-            if os.path.isdir(actual_export_dir):
+            if os.path.isdir(FLAGS.export_dir):
                 log_info('Removing old export')
-                shutil.rmtree(actual_export_dir)
+                shutil.rmtree(FLAGS.export_dir)
         try:
-            # Export serving model
-            model_exporter.export(FLAGS.export_dir, tf.constant(FLAGS.export_version), session)
+            output_graph_path=os.path.join(FLAGS.export_dir, 'output_graph.pb')
 
-            # Export graph
-            input_graph_name = 'input_graph.pb'
-            tf.train.write_graph(session.graph, FLAGS.export_dir, input_graph_name, as_text=False)
+            if not os.path.isdir(FLAGS.export_dir):
+                os.makedirs(FLAGS.export_dir)
 
             # Freeze graph
-            input_graph_path = os.path.join(FLAGS.export_dir, input_graph_name)
-            input_saver_def_path = ''
-            input_binary = True
-            output_node_names = 'output_node'
-            restore_op_name = 'save/restore_all'
-            filename_tensor_name = 'save/Const:0'
-            output_graph_path = os.path.join(FLAGS.export_dir, 'output_graph.pb')
-            clear_devices = False
-            freeze_graph.freeze_graph(input_graph_path, input_saver_def_path,
-                                      input_binary, checkpoint_path, output_node_names,
-                                      restore_op_name, filename_tensor_name,
-                                      output_graph_path, clear_devices, '')
+            freeze_graph.freeze_graph_with_def_protos(
+                input_graph_def=session.graph_def,
+                input_saver_def=saver.as_saver_def(),
+                input_checkpoint=checkpoint_path,
+                output_node_names='logits,initialize_state',
+                restore_op_name=None,
+                filename_tensor_name=None,
+                output_graph=output_graph_path,
+                clear_devices=False,
+                initializer_nodes='',
+                variable_names_blacklist='previous_state_c,previous_state_h')
+
+            # Load and export as string
+            with tf.gfile.FastGFile(output_graph_path, 'rb') as fin:
+                graph_def = tf.GraphDef()
+                graph_def.ParseFromString(fin.read())
+
+                with tf.gfile.FastGFile(output_graph_path + 'txt', 'w') as fout:
+                    from google.protobuf import text_format
+                    fout.write(text_format.MessageToString(graph_def))
 
             log_info('Models exported at %s' % (FLAGS.export_dir))
         except RuntimeError as e:

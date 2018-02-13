@@ -40,11 +40,18 @@ LocalDsSTT(Model& aCtx, const short* aBuffer, size_t aBufferSize,
   clock_t ds_start_time = clock();
   clock_t ds_end_mfcc = 0, ds_end_infer = 0;
 
+  printf("hi\n");
+  StreamingState* ctx = aCtx.setupStream();
+  aCtx.feedAudioContent(ctx, aBuffer, 600);
+  aCtx.feedAudioContent(ctx, aBuffer+600, 1200);
+  aCtx.feedAudioContent(ctx, aBuffer+1800, aBufferSize-1800);
+  res->string = aCtx.finishStream(ctx);
+
   int n_frames = 0;
-  aCtx.getInputVector(aBuffer, aBufferSize, aSampleRate, &mfcc, &n_frames);
+  // aCtx.getInputVector(aBuffer, aBufferSize, aSampleRate, &mfcc, &n_frames);
   ds_end_mfcc = clock();
 
-  res->string = aCtx.infer(mfcc, n_frames);
+  // res->string = aCtx.infer(mfcc, n_frames);
   ds_end_infer = clock();
 
   free(mfcc);

@@ -84,11 +84,19 @@ def main():
     fs, audio = wav.read(args.audio)
     if fs != 16000:
         fs, audio = convert_samplerate(args.audio)
-    audio_length = len(audio) * ( 1 / 16000)
+    audio_length = len(audio) * (1 / 16000)
+
+    mfcc = ds.getInputVector(audio, fs)
+    np.save('audiotoinputvector-features.npy', mfcc)
 
     print('Running inference.', file=sys.stderr)
     inference_start = timer()
-    print(ds.stt(audio, fs))
+    ctx = ds.setupStream()
+    window_size = 1000
+    for i in range(0, len(audio), window_size):
+        ds.feedAudioContent(ctx, audio[i:i + window_size])
+    print(ds.finishStream(ctx))
+
     inference_end = timer() - inference_start
     print('Inference took %0.3fs for %0.3fs audio file.' % (inference_end, audio_length), file=sys.stderr)
 
